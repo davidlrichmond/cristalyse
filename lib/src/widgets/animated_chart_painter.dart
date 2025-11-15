@@ -1751,16 +1751,20 @@ class AnimatedChartPainter extends CustomPainter {
 
       areaPath.close();
 
-      // Draw filled area if enabled
-      if (area.fillArea) {
+      // Draw filled area if fillAlpha > 0
+      if (area.fillAlpha > 0) {
+        final fillColor = area.fillColorOrGradient is Color
+            ? area.fillColorOrGradient as Color
+            : (area.fillColorOrGradient as Gradient).colors.first;
+
         final fillPaint = Paint()
-          ..color = area.color.withAlpha((area.alpha * 255).round())
+          ..color = fillColor.withAlpha((area.fillAlpha * 255).round())
           ..style = PaintingStyle.fill;
         canvas.drawPath(areaPath, fillPaint);
       }
 
-      // Draw stroke on top of fill
-      if (area.strokeWidth > 0) {
+      // Draw stroke on top of fill if strokeWidth is set
+      if (area.strokeWidth != null && area.strokeWidth! > 0 && area.strokeColor != null) {
         final strokePath = Path();
         strokePath.moveTo(area.points[0].dx, area.points[0].dy);
 
@@ -1781,8 +1785,8 @@ class AnimatedChartPainter extends CustomPainter {
         }
 
         final strokePaint = Paint()
-          ..color = area.color.withAlpha(255) // Full opacity for stroke
-          ..strokeWidth = area.strokeWidth
+          ..color = area.strokeColor!.withAlpha((area.strokeAlpha * 255).round())
+          ..strokeWidth = area.strokeWidth!
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round;
@@ -2160,11 +2164,11 @@ class AnimatedChartPainter extends CustomPainter {
       if (geometry.showLabels && sliceProgress > 0.5) {
         _drawPieSliceLabel(
           canvas,
-          slice.center,
+          slice.sliceCenter,
           slice.startAngle + animatedSweepAngle / 2,
           slice.value,
           slice.value / slice.percentage, // total
-          slice.category,
+          slice.category.toString(),
           geometry.labelStyle ?? theme.axisTextStyle,
           geometry,
         );
@@ -2187,12 +2191,12 @@ class AnimatedChartPainter extends CustomPainter {
     if (slice.innerRadius > 0) {
       // Donut chart - create proper donut slice path
       final outerStartX =
-          slice.center.dx + math.cos(slice.startAngle) * slice.outerRadius;
+          slice.sliceCenter.dx + math.cos(slice.startAngle) * slice.outerRadius;
       final outerStartY =
-          slice.center.dy + math.sin(slice.startAngle) * slice.outerRadius;
-      final innerEndX = slice.center.dx +
+          slice.sliceCenter.dy + math.sin(slice.startAngle) * slice.outerRadius;
+      final innerEndX = slice.sliceCenter.dx +
           math.cos(slice.startAngle + animatedSweepAngle) * slice.innerRadius;
-      final innerEndY = slice.center.dy +
+      final innerEndY = slice.sliceCenter.dy +
           math.sin(slice.startAngle + animatedSweepAngle) * slice.innerRadius;
 
       // Start at outer edge
@@ -2200,7 +2204,7 @@ class AnimatedChartPainter extends CustomPainter {
 
       // Draw outer arc
       path.arcTo(
-        Rect.fromCircle(center: slice.center, radius: slice.outerRadius),
+        Rect.fromCircle(center: slice.sliceCenter, radius: slice.outerRadius),
         slice.startAngle,
         animatedSweepAngle,
         false,
@@ -2211,7 +2215,7 @@ class AnimatedChartPainter extends CustomPainter {
 
       // Draw inner arc (in reverse)
       path.arcTo(
-        Rect.fromCircle(center: slice.center, radius: slice.innerRadius),
+        Rect.fromCircle(center: slice.sliceCenter, radius: slice.innerRadius),
         slice.startAngle + animatedSweepAngle,
         -animatedSweepAngle,
         false,
@@ -2221,9 +2225,9 @@ class AnimatedChartPainter extends CustomPainter {
       path.close();
     } else {
       // Full pie chart
-      path.moveTo(slice.center.dx, slice.center.dy);
+      path.moveTo(slice.sliceCenter.dx, slice.sliceCenter.dy);
       path.arcTo(
-        Rect.fromCircle(center: slice.center, radius: slice.outerRadius),
+        Rect.fromCircle(center: slice.sliceCenter, radius: slice.outerRadius),
         slice.startAngle,
         animatedSweepAngle,
         false,
@@ -2336,39 +2340,25 @@ class AnimatedChartPainter extends CustomPainter {
       return;
     }
 
-    // Get grid dimensions for animation delay calculation
-    final maxXIndex = cells.map((c) => c.xIndex).reduce(math.max);
-    final maxYIndex = cells.map((c) => c.yIndex).reduce(math.max);
+    // Build index maps for animation delay calculation
+    final xValues = cells.map((c) => c.xValue).toSet().toList();
+    final yValues = cells.map((c) => c.yValue).toSet().toList();
+    sortHeatMapValues(xValues);
+    sortHeatMapValues(yValues);
+    final xIndexMap = {for (var i = 0; i < xValues.length; i++) xValues[i]: i};
+    final yIndexMap = {for (var i = 0; i < yValues.length; i++) yValues[i]: i};
+    final maxXIndex = xValues.length - 1;
+    final maxYIndex = yValues.length - 1;
 
     // Draw cells
     for (final cell in cells) {
-      if (cell.value == null) {
-        // Draw null value cell if color is configured
-        if (geometry.nullValueColor != null) {
-          final baseAlpha =
-              (geometry.nullValueColor!.a * 255.0).round() & 0xff;
-          final animatedAlpha = (baseAlpha * heatMapProgress).round();
-          final clampedAlpha = animatedAlpha.clamp(0, 255).toInt();
-
-          final nullPaint = Paint()
-            ..color = geometry.nullValueColor!.withAlpha(clampedAlpha)
-            ..style = PaintingStyle.fill;
-
-          if (geometry.cellBorderRadius != null) {
-            canvas.drawRRect(
-              geometry.cellBorderRadius!.toRRect(cell.rect),
-              nullPaint,
-            );
-          } else {
-            canvas.drawRect(cell.rect, nullPaint);
-          }
-        }
-        continue;
-      }
+      // Get indices for animation delay
+      final xIndex = xIndexMap[cell.xValue] ?? 0;
+      final yIndex = yIndexMap[cell.yValue] ?? 0;
 
       // Calculate cell animation with wave effect
       final cellDelay =
-          (cell.xIndex + cell.yIndex) / (maxXIndex + maxYIndex + 2) * 0.3;
+          (xIndex + yIndex) / (maxXIndex + maxYIndex + 2) * 0.3;
       final cellProgress = math.max(
         0.0,
         math.min(
@@ -2444,8 +2434,8 @@ class AnimatedChartPainter extends CustomPainter {
       height: cell.rect.height * progress,
     );
 
-    // Draw cell
-    final baseAlpha = (cell.color.a * 255.0).round() & 0xff;
+    // Draw cell - combine cell alpha with animation progress
+    final baseAlpha = (cell.alpha * 255.0).round() & 0xff;
     final animatedAlpha = (baseAlpha * progress).round();
     final minVisibleAlpha = math.max(200, animatedAlpha);
     final clampedAlpha = minVisibleAlpha.clamp(0, 255).toInt();

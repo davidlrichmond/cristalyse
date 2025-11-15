@@ -613,14 +613,15 @@ class GeometryCalculator {
       slices.add(PieSliceData(
         startAngle: currentAngle,
         sweepAngle: sweepAngle,
-        center: sliceCenter,
+        pieCenter: center,
+        sliceCenter: sliceCenter,
         outerRadius: outerRadius,
         innerRadius: innerRadius,
         color: sliceColor,
+        alpha: 1.0,
+        category: category,
         value: value,
-        category: category.toString(),
         percentage: value / total,
-        dataPoint: data[i],
       ));
 
       currentAngle += sweepAngle;
@@ -719,24 +720,22 @@ class GeometryCalculator {
           cellHeight,
         );
 
-        // Use GradientColorScale to get color (removing duplication)
-        final cellColor = value != null
-            ? gradientColorScale.scale(value)
-            : (geometry.nullValueColor ?? Colors.transparent);
+        // Only create cells for non-null values
+        // Null values will be handled separately in the painter if needed
+        if (value != null) {
+          final cellColor = gradientColorScale.scale(value);
+          final normalizedValue = gradientColorScale.normalize(value);
 
-        final normalizedValue =
-            value != null ? gradientColorScale.normalize(value) : null;
-
-        cells.add(HeatMapCellData(
-          rect: cellRect,
-          xValue: xVal,
-          yValue: yVal,
-          value: value,
-          color: cellColor,
-          normalizedValue: normalizedValue,
-          xIndex: xi,
-          yIndex: yi,
-        ));
+          cells.add(HeatMapCellData(
+            rect: cellRect,
+            xValue: xVal,
+            yValue: yVal,
+            value: value,
+            color: cellColor,
+            alpha: 1.0,
+            normalizedValue: normalizedValue,
+          ));
+        }
       }
     }
 
@@ -802,10 +801,11 @@ class GeometryCalculator {
     return AreaRenderData(
       points: points,
       baselineY: baselineY,
-      color: color,
-      alpha: geometry.alpha,
-      fillArea: geometry.fillArea,
-      strokeWidth: geometry.strokeWidth,
+      fillColorOrGradient: color,
+      fillAlpha: geometry.fillArea ? geometry.alpha : 0.0,
+      strokeColor: geometry.strokeWidth > 0 ? color : null,
+      strokeWidth: geometry.strokeWidth > 0 ? geometry.strokeWidth : null,
+      strokeAlpha: geometry.strokeWidth > 0 ? 1.0 : 0.0,
     );
   }
 }
