@@ -1635,8 +1635,19 @@ class AnimatedChartPainter extends CustomPainter {
       return;
     }
 
+    // Use GeometryCalculator to get area geometries
+    final calculator = GeometryCalculator(
+      data: data,
+      xColumn: xColumn,
+      yColumn: yColumn,
+      colorColumn: colorColumn,
+      sizeColumn: sizeColumn,
+      theme: theme,
+      coordFlipped: coordFlipped,
+    );
+
     if (colorColumn != null) {
-      // Group by color and draw separate areas
+      // Group by color and calculate separate areas
       final groupedData = <dynamic, List<Map<String, dynamic>>>{};
       for (final point in data) {
         final colorValue = point[colorColumn];
@@ -1647,30 +1658,137 @@ class AnimatedChartPainter extends CustomPainter {
         final colorValue = entry.key;
         final groupData = entry.value;
         final areaColor = geometry.color ?? colorScale.scale(colorValue);
-        _drawSingleArea(
-          canvas,
-          plotArea,
-          groupData,
+
+        // Create temporary calculator for this group
+        final groupCalculator = GeometryCalculator(
+          data: groupData,
+          xColumn: xColumn,
+          yColumn: yColumn,
+          colorColumn: colorColumn,
+          sizeColumn: sizeColumn,
+          theme: theme,
+          coordFlipped: coordFlipped,
+        );
+
+        final area = groupCalculator.calculateArea(
+          geometry,
           xScale,
           yScale,
           areaColor,
-          geometry,
+          plotArea,
+          groupData,
           yCol,
         );
+
+        if (area != null) {
+          _renderArea(canvas, area);
+        }
       }
     } else {
-      // Draw single area for all data
+      // Calculate single area for all data
       final areaColor = geometry.color ?? theme.primaryColor;
-      _drawSingleArea(
-        canvas,
-        plotArea,
-        data,
+      final area = calculator.calculateArea(
+        geometry,
         xScale,
         yScale,
         areaColor,
-        geometry,
+        plotArea,
+        data,
         yCol,
       );
+
+      if (area != null) {
+        _renderArea(canvas, area);
+      }
+    }
+  }
+
+  /// Renders an area to the canvas using its RenderData.
+  ///
+  /// Handles progressive animation (drawing segment-by-segment).
+  void _renderArea(Canvas canvas, AreaRenderData area) {
+    if (area.points.length < 2) return;
+
+    final areaProgress = math.max(0.0, math.min(1.0, animationProgress));
+    if (areaProgress <= 0.001) return;
+
+    // Create path for area fill
+    final areaPath = Path();
+    final int numSegments = area.points.length - 1;
+    final double totalProgressiveSegments = numSegments * areaProgress;
+    final int fullyDrawnSegments = totalProgressiveSegments.floor();
+    final double partialSegmentProgress =
+        totalProgressiveSegments - fullyDrawnSegments;
+
+    if (fullyDrawnSegments > 0 || partialSegmentProgress > 0.001) {
+      // Start from bottom of first point
+      areaPath.moveTo(area.points[0].dx, area.baselineY);
+      areaPath.lineTo(area.points[0].dx, area.points[0].dy);
+
+      // Draw line to all fully drawn points
+      for (int i = 0; i < fullyDrawnSegments; i++) {
+        areaPath.lineTo(area.points[i + 1].dx, area.points[i + 1].dy);
+      }
+
+      // Handle partial segment
+      if (partialSegmentProgress > 0.001 && fullyDrawnSegments < numSegments) {
+        final Offset lastFullPoint = area.points[fullyDrawnSegments];
+        final Offset nextPoint = area.points[fullyDrawnSegments + 1];
+
+        final double dx = lastFullPoint.dx +
+            (nextPoint.dx - lastFullPoint.dx) * partialSegmentProgress;
+        final double dy = lastFullPoint.dy +
+            (nextPoint.dy - lastFullPoint.dy) * partialSegmentProgress;
+        areaPath.lineTo(dx, dy);
+
+        // Close area back to baseline
+        areaPath.lineTo(dx, area.baselineY);
+      } else if (fullyDrawnSegments > 0) {
+        // Close area back to baseline from last full point
+        final lastPoint = area.points[fullyDrawnSegments];
+        areaPath.lineTo(lastPoint.dx, area.baselineY);
+      }
+
+      areaPath.close();
+
+      // Draw filled area if enabled
+      if (area.fillArea) {
+        final fillPaint = Paint()
+          ..color = area.color.withAlpha((area.alpha * 255).round())
+          ..style = PaintingStyle.fill;
+        canvas.drawPath(areaPath, fillPaint);
+      }
+
+      // Draw stroke on top of fill
+      if (area.strokeWidth > 0) {
+        final strokePath = Path();
+        strokePath.moveTo(area.points[0].dx, area.points[0].dy);
+
+        for (int i = 0; i < fullyDrawnSegments; i++) {
+          strokePath.lineTo(area.points[i + 1].dx, area.points[i + 1].dy);
+        }
+
+        if (partialSegmentProgress > 0.001 &&
+            fullyDrawnSegments < numSegments) {
+          final Offset lastFullPoint = area.points[fullyDrawnSegments];
+          final Offset nextPoint = area.points[fullyDrawnSegments + 1];
+
+          final double dx = lastFullPoint.dx +
+              (nextPoint.dx - lastFullPoint.dx) * partialSegmentProgress;
+          final double dy = lastFullPoint.dy +
+              (nextPoint.dy - lastFullPoint.dy) * partialSegmentProgress;
+          strokePath.lineTo(dx, dy);
+        }
+
+        final strokePaint = Paint()
+          ..color = area.color.withAlpha(255) // Full opacity for stroke
+          ..strokeWidth = area.strokeWidth
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+
+        canvas.drawPath(strokePath, strokePaint);
+      }
     }
   }
 
@@ -1991,53 +2109,38 @@ class AnimatedChartPainter extends CustomPainter {
     PieGeometry geometry,
     ColorScale colorScale,
   ) {
-    // Use pie-specific columns or fall back to regular columns
-    final valueColumn = pieValueColumn ?? yColumn;
-    final categoryColumn = pieCategoryColumn ?? colorColumn ?? xColumn;
-
-    if (valueColumn == null || categoryColumn == null || data.isEmpty) {
-      return;
-    }
-
-    // Calculate center point of the plot area
-    final center = Offset(
-      plotArea.left + plotArea.width / 2,
-      plotArea.top + plotArea.height / 2,
+    // Use GeometryCalculator to get all pie slices
+    final calculator = GeometryCalculator(
+      data: data,
+      xColumn: xColumn,
+      yColumn: yColumn,
+      colorColumn: colorColumn,
+      sizeColumn: sizeColumn,
+      pieValueColumn: pieValueColumn,
+      pieCategoryColumn: pieCategoryColumn,
+      theme: theme,
+      coordFlipped: coordFlipped,
     );
 
-    // Calculate radius based on plot area (leave margin for labels)
-    final maxRadius = math.min(plotArea.width, plotArea.height) / 2 - 50;
-    final outerRadius = math.min(geometry.outerRadius, maxRadius);
-    final innerRadius = math.min(
-      geometry.innerRadius,
-      outerRadius * 0.8,
-    ); // Ensure inner radius isn't too close to outer
+    final slices = calculator.calculatePieSlices(
+      geometry,
+      colorScale,
+      plotArea,
+    );
 
-    // Extract and calculate values
-    final values =
-        data.map((d) => getNumericValue(d[valueColumn]) ?? 0).toList();
-    final total = values.fold<double>(0, (sum, val) => sum + val);
-
-    if (total <= 0) return;
+    if (slices.isEmpty) return;
 
     // Animation progress for pie chart
     final pieProgress = math.max(0.0, math.min(1.0, animationProgress));
     if (pieProgress <= 0.001) return;
 
     // Draw pie slices
-    double currentAngle = geometry.startAngle;
-
-    for (int i = 0; i < data.length; i++) {
-      final value = values[i];
-      if (value <= 0) continue;
-
-      final sweepAngle = (value / total) * 2 * math.pi;
-      final category = data[i][categoryColumn];
-      final sliceColor = colorScale.scale(category);
+    for (int i = 0; i < slices.length; i++) {
+      final slice = slices[i];
 
       // Animation: each slice grows with a slight delay
       final sliceDelay =
-          i / data.length * 0.3; // 30% of animation for staggering
+          i / slices.length * 0.3; // 30% of animation for staggering
       final sliceProgress = math.max(
         0.0,
         math.min(
@@ -2046,102 +2149,101 @@ class AnimatedChartPainter extends CustomPainter {
         ),
       );
 
-      if (sliceProgress <= 0) {
-        currentAngle += sweepAngle;
-        continue;
-      }
+      if (sliceProgress <= 0) continue;
 
-      final animatedSweepAngle = sweepAngle * sliceProgress;
+      final animatedSweepAngle = slice.sweepAngle * sliceProgress;
 
-      // Calculate slice center for explosion effect
-      Offset sliceCenter = center;
-      if (geometry.explodeSlices) {
-        final midAngle = currentAngle + animatedSweepAngle / 2;
-        sliceCenter = Offset(
-          center.dx + math.cos(midAngle) * geometry.explodeDistance,
-          center.dy + math.sin(midAngle) * geometry.explodeDistance,
-        );
-      }
-
-      // Create slice path
-      final path = Path();
-      if (innerRadius > 0) {
-        // Donut chart - create proper donut slice path
-        final outerStartX =
-            sliceCenter.dx + math.cos(currentAngle) * outerRadius;
-        final outerStartY =
-            sliceCenter.dy + math.sin(currentAngle) * outerRadius;
-        final innerEndX = sliceCenter.dx +
-            math.cos(currentAngle + animatedSweepAngle) * innerRadius;
-        final innerEndY = sliceCenter.dy +
-            math.sin(currentAngle + animatedSweepAngle) * innerRadius;
-
-        // Start at outer edge
-        path.moveTo(outerStartX, outerStartY);
-
-        // Draw outer arc
-        path.arcTo(
-          Rect.fromCircle(center: sliceCenter, radius: outerRadius),
-          currentAngle,
-          animatedSweepAngle,
-          false,
-        );
-
-        // Draw line to inner edge
-        path.lineTo(innerEndX, innerEndY);
-
-        // Draw inner arc (in reverse)
-        path.arcTo(
-          Rect.fromCircle(center: sliceCenter, radius: innerRadius),
-          currentAngle + animatedSweepAngle,
-          -animatedSweepAngle,
-          false,
-        );
-
-        // Close the path
-        path.close();
-      } else {
-        // Full pie chart
-        path.moveTo(sliceCenter.dx, sliceCenter.dy);
-        path.arcTo(
-          Rect.fromCircle(center: sliceCenter, radius: outerRadius),
-          currentAngle,
-          animatedSweepAngle,
-          false,
-        );
-        path.close();
-      }
-
-      // Draw slice
-      final fillPaint = Paint()
-        ..color = sliceColor
-        ..style = PaintingStyle.fill;
-      canvas.drawPath(path, fillPaint);
-
-      // Draw stroke if specified
-      if (geometry.strokeWidth > 0) {
-        final strokePaint = Paint()
-          ..color = geometry.strokeColor ?? Colors.white
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = geometry.strokeWidth;
-        canvas.drawPath(path, strokePaint);
-      }
+      // Render the slice
+      _renderPieSlice(canvas, slice, animatedSweepAngle, sliceProgress, geometry);
 
       // Draw labels if enabled and slice is mostly visible
       if (geometry.showLabels && sliceProgress > 0.5) {
         _drawPieSliceLabel(
           canvas,
-          sliceCenter,
-          currentAngle + animatedSweepAngle / 2,
-          value,
-          total,
-          category.toString(),
+          slice.center,
+          slice.startAngle + animatedSweepAngle / 2,
+          slice.value,
+          slice.value / slice.percentage, // total
+          slice.category,
           geometry.labelStyle ?? theme.axisTextStyle,
           geometry,
         );
       }
+    }
+  }
 
-      currentAngle += sweepAngle;
+  /// Renders a pie slice to the canvas using its RenderData.
+  ///
+  /// Handles donut charts and full pie charts with stroke.
+  void _renderPieSlice(
+    Canvas canvas,
+    PieSliceData slice,
+    double animatedSweepAngle,
+    double progress,
+    PieGeometry geometry,
+  ) {
+    // Create slice path
+    final path = Path();
+    if (slice.innerRadius > 0) {
+      // Donut chart - create proper donut slice path
+      final outerStartX =
+          slice.center.dx + math.cos(slice.startAngle) * slice.outerRadius;
+      final outerStartY =
+          slice.center.dy + math.sin(slice.startAngle) * slice.outerRadius;
+      final innerEndX = slice.center.dx +
+          math.cos(slice.startAngle + animatedSweepAngle) * slice.innerRadius;
+      final innerEndY = slice.center.dy +
+          math.sin(slice.startAngle + animatedSweepAngle) * slice.innerRadius;
+
+      // Start at outer edge
+      path.moveTo(outerStartX, outerStartY);
+
+      // Draw outer arc
+      path.arcTo(
+        Rect.fromCircle(center: slice.center, radius: slice.outerRadius),
+        slice.startAngle,
+        animatedSweepAngle,
+        false,
+      );
+
+      // Draw line to inner edge
+      path.lineTo(innerEndX, innerEndY);
+
+      // Draw inner arc (in reverse)
+      path.arcTo(
+        Rect.fromCircle(center: slice.center, radius: slice.innerRadius),
+        slice.startAngle + animatedSweepAngle,
+        -animatedSweepAngle,
+        false,
+      );
+
+      // Close the path
+      path.close();
+    } else {
+      // Full pie chart
+      path.moveTo(slice.center.dx, slice.center.dy);
+      path.arcTo(
+        Rect.fromCircle(center: slice.center, radius: slice.outerRadius),
+        slice.startAngle,
+        animatedSweepAngle,
+        false,
+      );
+      path.close();
+    }
+
+    // Draw slice
+    final fillPaint = Paint()
+      ..color = slice.color
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(path, fillPaint);
+
+    // Draw stroke if specified
+    if (geometry.strokeWidth > 0) {
+      final strokePaint = Paint()
+        ..color = geometry.strokeColor ?? Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = geometry.strokeWidth;
+      canvas.drawPath(path, strokePaint);
     }
   }
 
@@ -2206,63 +2308,27 @@ class AnimatedChartPainter extends CustomPainter {
     HeatMapGeometry geometry,
     GradientColorScale gradientColorScale,
   ) {
-    // Use heat map specific columns
-    final xCol = heatMapXColumn ?? xColumn;
-    final yCol = heatMapYColumn ?? yColumn;
-    final valueCol = heatMapValueColumn;
+    // Use GeometryCalculator to get all heat map cells
+    final calculator = GeometryCalculator(
+      data: data,
+      xColumn: xColumn,
+      yColumn: yColumn,
+      colorColumn: colorColumn,
+      sizeColumn: sizeColumn,
+      heatMapXColumn: heatMapXColumn,
+      heatMapYColumn: heatMapYColumn,
+      heatMapValueColumn: heatMapValueColumn,
+      theme: theme,
+      coordFlipped: coordFlipped,
+    );
 
-    if (valueCol == null) {
-      throw ArgumentError(
-        'Heat maps require heatMapValueColumn. '
-        'Use .mappingHeatMap(x: "xCol", y: "yCol", value: "valueCol").',
-      );
-    }
+    final cells = calculator.calculateHeatMap(
+      geometry,
+      gradientColorScale,
+      plotArea,
+    );
 
-    if (xCol == null || yCol == null || data.isEmpty) {
-      return;
-    }
-
-    // Get unique X and Y values to determine grid
-    final xValues =
-        data.map((d) => d[xCol]).where((v) => v != null).toSet().toList();
-    final yValues =
-        data.map((d) => d[yCol]).where((v) => v != null).toSet().toList();
-
-    if (xValues.isEmpty || yValues.isEmpty) {
-      return;
-    }
-
-    // Sort values for consistent ordering using existing helper
-    sortHeatMapValues(xValues);
-    sortHeatMapValues(yValues);
-
-    // Calculate cell dimensions considering spacing
-    final totalSpacingX = geometry.cellSpacing * (xValues.length + 1);
-    final totalSpacingY = geometry.cellSpacing * (yValues.length + 1);
-    double cellWidth = (plotArea.width - totalSpacingX) / xValues.length;
-    double cellHeight = (plotArea.height - totalSpacingY) / yValues.length;
-
-    if (geometry.cellAspectRatio != null) {
-      // Adjust cell dimensions to maintain aspect ratio
-      final targetHeight = cellWidth / geometry.cellAspectRatio!;
-      if (targetHeight < cellHeight) {
-        cellHeight = targetHeight;
-      } else {
-        cellWidth = cellHeight * geometry.cellAspectRatio!;
-      }
-    }
-
-    // Create a map for quick lookup
-    final dataMap = <String, double>{};
-    for (final point in data) {
-      final x = point[xCol];
-      final y = point[yCol];
-      final value = getNumericValue(point[valueCol]);
-      if (x != null && y != null && value != null) {
-        final key = '${x}_$y';
-        dataMap[key] = value;
-      }
-    }
+    if (cells.isEmpty) return;
 
     // Animation progress
     final heatMapProgress = math.max(0.0, math.min(1.0, animationProgress));
@@ -2270,143 +2336,138 @@ class AnimatedChartPainter extends CustomPainter {
       return;
     }
 
+    // Get grid dimensions for animation delay calculation
+    final maxXIndex = cells.map((c) => c.xIndex).reduce(math.max);
+    final maxYIndex = cells.map((c) => c.yIndex).reduce(math.max);
+
     // Draw cells
-    for (int xi = 0; xi < xValues.length; xi++) {
-      for (int yi = 0; yi < yValues.length; yi++) {
-        final xVal = xValues[xi];
-        final yVal = yValues[yi];
-        final key = '${xVal}_$yVal';
-        final value = dataMap[key];
+    for (final cell in cells) {
+      if (cell.value == null) {
+        // Draw null value cell if color is configured
+        if (geometry.nullValueColor != null) {
+          final baseAlpha =
+              (geometry.nullValueColor!.a * 255.0).round() & 0xff;
+          final animatedAlpha = (baseAlpha * heatMapProgress).round();
+          final clampedAlpha = animatedAlpha.clamp(0, 255).toInt();
 
-        // Calculate cell position with spacing
-        final cellRect = Rect.fromLTWH(
-          plotArea.left +
-              geometry.cellSpacing +
-              xi * (cellWidth + geometry.cellSpacing),
-          plotArea.top +
-              geometry.cellSpacing +
-              yi * (cellHeight + geometry.cellSpacing),
-          cellWidth,
-          cellHeight,
-        );
+          final nullPaint = Paint()
+            ..color = geometry.nullValueColor!.withAlpha(clampedAlpha)
+            ..style = PaintingStyle.fill;
 
-        if (value == null) {
-          // Draw null value cell if color is configured
-          if (geometry.nullValueColor != null) {
-            final baseAlpha =
-                (geometry.nullValueColor!.a * 255.0).round() & 0xff;
-            final animatedAlpha = (baseAlpha * heatMapProgress).round();
-            final clampedAlpha = animatedAlpha.clamp(0, 255).toInt();
-
-            final nullPaint = Paint()
-              ..color = geometry.nullValueColor!.withAlpha(clampedAlpha)
-              ..style = PaintingStyle.fill;
-
-            if (geometry.cellBorderRadius != null) {
-              canvas.drawRRect(
-                geometry.cellBorderRadius!.toRRect(cellRect),
-                nullPaint,
-              );
-            } else {
-              canvas.drawRect(cellRect, nullPaint);
-            }
+          if (geometry.cellBorderRadius != null) {
+            canvas.drawRRect(
+              geometry.cellBorderRadius!.toRRect(cell.rect),
+              nullPaint,
+            );
+          } else {
+            canvas.drawRect(cell.rect, nullPaint);
           }
-          continue;
         }
-
-        // Calculate cell animation with wave effect
-        final cellDelay = (xi + yi) / (xValues.length + yValues.length) * 0.3;
-        final cellProgress = math.max(
-          0.0,
-          math.min(
-            1.0,
-            (heatMapProgress - cellDelay) / math.max(0.001, 1.0 - cellDelay),
-          ),
-        );
-
-        if (cellProgress <= 0) continue;
-
-        // Calculate color using GradientColorScale
-        final cellColor = gradientColorScale.scale(value);
-
-        // Calculate normalized value for text color logic
-        final normalizedValue = gradientColorScale.normalize(value);
-
-        // Animate cell
-        Rect animatedRect = cellRect;
-        final centerX = cellRect.center.dx;
-        final centerY = cellRect.center.dy;
-        final scaledWidth = cellRect.width * cellProgress;
-        final scaledHeight = cellRect.height * cellProgress;
-        animatedRect = Rect.fromCenter(
-          center: Offset(centerX, centerY),
-          width: scaledWidth,
-          height: scaledHeight,
-        );
-
-        // Draw cell
-        final baseAlpha = (cellColor.a * 255.0).round() & 0xff;
-        final animatedAlpha = (baseAlpha * cellProgress).round();
-        final minVisibleAlpha = math.max(200, animatedAlpha);
-        final clampedAlpha = minVisibleAlpha.clamp(0, 255).toInt();
-
-        final cellPaint = Paint()
-          ..color = cellColor.withAlpha(clampedAlpha)
-          ..style = PaintingStyle.fill;
-
-        if (geometry.cellBorderRadius != null) {
-          // Scale border radius with animation
-          final animatedBorderRadius = BorderRadius.only(
-            topLeft: geometry.cellBorderRadius!.topLeft * cellProgress,
-            topRight: geometry.cellBorderRadius!.topRight * cellProgress,
-            bottomLeft: geometry.cellBorderRadius!.bottomLeft * cellProgress,
-            bottomRight: geometry.cellBorderRadius!.bottomRight * cellProgress,
-          );
-          canvas.drawRRect(
-            animatedBorderRadius.toRRect(animatedRect),
-            cellPaint,
-          );
-        } else {
-          canvas.drawRect(animatedRect, cellPaint);
-        }
-
-        // Draw value label if configured
-        if (geometry.showValues && cellProgress > 0.5) {
-          final labelText =
-              geometry.valueFormatter?.call(value) ?? value.toStringAsFixed(1);
-
-          // Use black text for normalized values < 15%, otherwise use brightness-based logic
-          final textColor = normalizedValue < 0.15
-              ? Colors.black
-              : (ThemeData.estimateBrightnessForColor(cellColor) ==
-                      Brightness.dark
-                  ? Colors.white
-                  : Colors.black);
-
-          final textStyle = geometry.valueTextStyle ??
-              TextStyle(color: textColor, fontSize: 10);
-
-          final textPainter = TextPainter(
-            text: TextSpan(
-              text: labelText,
-              style: textStyle.copyWith(
-                color: textStyle.color?.withAlpha((255 * cellProgress).round()),
-              ),
-            ),
-            textAlign: TextAlign.center,
-            textDirection: TextDirection.ltr,
-          );
-          textPainter.layout();
-
-          // Calculate text position (center of cell)
-          final textOffset = Offset(
-            animatedRect.center.dx - textPainter.width / 2,
-            animatedRect.center.dy - textPainter.height / 2,
-          );
-
-          textPainter.paint(canvas, textOffset);
-        }
+        continue;
       }
+
+      // Calculate cell animation with wave effect
+      final cellDelay =
+          (cell.xIndex + cell.yIndex) / (maxXIndex + maxYIndex + 2) * 0.3;
+      final cellProgress = math.max(
+        0.0,
+        math.min(
+          1.0,
+          (heatMapProgress - cellDelay) / math.max(0.001, 1.0 - cellDelay),
+        ),
+      );
+
+      if (cellProgress <= 0) continue;
+
+      // Render the cell
+      _renderHeatMapCell(canvas, cell, cellProgress, geometry);
+
+      // Draw value label if configured
+      if (geometry.showValues && cellProgress > 0.5) {
+        final labelText = geometry.valueFormatter?.call(cell.value!) ??
+            cell.value!.toStringAsFixed(1);
+
+        // Use black text for normalized values < 15%, otherwise use brightness-based logic
+        final textColor = cell.normalizedValue! < 0.15
+            ? Colors.black
+            : (ThemeData.estimateBrightnessForColor(cell.color) ==
+                    Brightness.dark
+                ? Colors.white
+                : Colors.black);
+
+        final textStyle = geometry.valueTextStyle ??
+            TextStyle(color: textColor, fontSize: 10);
+
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text: labelText,
+            style: textStyle.copyWith(
+              color: textStyle.color?.withAlpha((255 * cellProgress).round()),
+            ),
+          ),
+          textAlign: TextAlign.center,
+          textDirection: TextDirection.ltr,
+        );
+        textPainter.layout();
+
+        // Calculate animated rect center
+        final animatedRect = Rect.fromCenter(
+          center: cell.rect.center,
+          width: cell.rect.width * cellProgress,
+          height: cell.rect.height * cellProgress,
+        );
+
+        // Calculate text position (center of cell)
+        final textOffset = Offset(
+          animatedRect.center.dx - textPainter.width / 2,
+          animatedRect.center.dy - textPainter.height / 2,
+        );
+
+        textPainter.paint(canvas, textOffset);
+      }
+    }
+  }
+
+  /// Renders a heat map cell to the canvas using its RenderData.
+  ///
+  /// Handles cell animation (scale from center) and border radius.
+  void _renderHeatMapCell(
+    Canvas canvas,
+    HeatMapCellData cell,
+    double progress,
+    HeatMapGeometry geometry,
+  ) {
+    // Animate cell (scale from center)
+    final animatedRect = Rect.fromCenter(
+      center: cell.rect.center,
+      width: cell.rect.width * progress,
+      height: cell.rect.height * progress,
+    );
+
+    // Draw cell
+    final baseAlpha = (cell.color.a * 255.0).round() & 0xff;
+    final animatedAlpha = (baseAlpha * progress).round();
+    final minVisibleAlpha = math.max(200, animatedAlpha);
+    final clampedAlpha = minVisibleAlpha.clamp(0, 255).toInt();
+
+    final cellPaint = Paint()
+      ..color = cell.color.withAlpha(clampedAlpha)
+      ..style = PaintingStyle.fill;
+
+    if (geometry.cellBorderRadius != null) {
+      // Scale border radius with animation
+      final animatedBorderRadius = BorderRadius.only(
+        topLeft: geometry.cellBorderRadius!.topLeft * progress,
+        topRight: geometry.cellBorderRadius!.topRight * progress,
+        bottomLeft: geometry.cellBorderRadius!.bottomLeft * progress,
+        bottomRight: geometry.cellBorderRadius!.bottomRight * progress,
+      );
+      canvas.drawRRect(
+        animatedBorderRadius.toRRect(animatedRect),
+        cellPaint,
+      );
+    } else {
+      canvas.drawRect(animatedRect, cellPaint);
     }
   }
 
