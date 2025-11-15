@@ -3,6 +3,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../core/geometry.dart';
+import '../core/geometry_calculator.dart';
+import '../core/render_models.dart';
 import '../core/scale.dart';
 import '../core/util/helper.dart';
 import '../themes/chart_theme.dart';
